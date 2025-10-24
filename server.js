@@ -5,7 +5,11 @@ const bodyParser = require("body-parser");
 const sendgrid = require("@sendgrid/mail");
 const cors = require("cors");
 const corsOptions = {
-  origin: ["https://www.kaalikacreations.com"],
+  origin: [
+    "https://kaalikacreations.com",
+    "https://ecom-kaalika-crea-git-1a95c1-badriraminindia-gmailcoms-projects.vercel.app",
+    "https://ecom-kaalika-creations-m9q3-8tu8asl7u.vercel.app"// add your actual frontend domain here if different
+  ],
   credentials: true
 };
 
