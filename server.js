@@ -4,6 +4,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const sendgrid = require("@sendgrid/mail");
 const cors = require("cors");
+const crypto = require('crypto');
 const corsOptions = {
   origin: [
     "https://kaalikacreations.com",
@@ -15,8 +16,15 @@ const corsOptions = {
 
 const app = express();
 const PORT = 4000;
-const strapiToken = process.env.STRAPI_API_TOKEN;
-console.log("Using Strapi API Token:", strapiToken);
+const STRAPI_TOKEN = process.env.STRAPI_API_TOKEN;
+const STRAPI_BASE = process.env.STRAPI_BASE_URL || 'https://admin.kaalikacreations.com';
+
+function maskToken(token) {
+  if (!token || typeof token !== 'string') return 'NO_TOKEN';
+  if (token.length <= 8) return '****';
+  return token.slice(0, 4) + '...' + token.slice(-4);
+}
+console.log("Using Strapi API Token:", maskToken(STRAPI_TOKEN));
 
 // Middleware
 app.use(cors(corsOptions));
@@ -26,9 +34,64 @@ app.use(bodyParser.json());
 sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
 
 // Updated checkout route with new validation
+// Map client payment values to Strapi enum values
+function mapPaymentMethod(clientValue) {
+  const map = {
+    'credit-card': 'Card',
+    'paypal': 'Paypal',
+    'cod': 'Cash on Delivery'
+  };
+  return map[clientValue];
+}
+
+// Helper: sleep for ms
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Determine if error is transient (network error or 5xx)
+function isTransientError(err) {
+  if (!err) return false;
+  if (err.code && (err.code === 'ECONNABORTED' || err.code === 'ECONNRESET' || err.code === 'ENOTFOUND')) return true;
+  if (err.response && err.response.status && err.response.status >= 500) return true;
+  // treat no response as transient
+  if (err.request && !err.response) return true;
+  return false;
+}
+
+// Post to Strapi with retries/backoff
+async function postToStrapi(payload, idempotencyKey, maxRetries = 3) {
+  const base = process.env.STRAPI_BASE_URL || STRAPI_BASE;
+  const url = `${base}/api/orders`;
+  const headers = { Authorization: `Bearer ${STRAPI_TOKEN}` };
+  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+
+  let attempt = 0;
+  while (attempt <= maxRetries) {
+    try {
+      const resp = await axios.post(url, { data: payload }, { headers });
+      return resp;
+    } catch (err) {
+      attempt++;
+      const transient = isTransientError(err);
+      // Mask-sensitive logs
+      const maskedHeaders = Object.assign({}, (err.config && err.config.headers) || {});
+      if (maskedHeaders && maskedHeaders.Authorization) maskedHeaders.Authorization = maskToken(maskedHeaders.Authorization);
+      console.error(`Strapi post attempt ${attempt} error (masked headers):`, maskedHeaders);
+      if (!transient || attempt > maxRetries) {
+        // permanent or out of retries
+        throw err;
+      }
+      // exponential backoff
+      const backoff = 500 * Math.pow(2, attempt - 1);
+      await sleep(backoff);
+    }
+  }
+}
+
 app.post("/api/checkout", async (req, res) => {
   try {
-    const { cart, totalCost, name, address, paymentMethod, customerEmail, paymentId } = req.body;
+    const { cart, totalCost, name, address, paymentMethod, customerEmail, paymentId, idempotencyKey: bodyIdempotencyKey } = req.body;
     let missing = [];
     if (!cart) missing.push("cart");
     if (!Array.isArray(cart)) missing.push("cart (must be an array)");
@@ -40,7 +103,17 @@ app.post("/api/checkout", async (req, res) => {
       return res.status(400).json({ success: false, message: `Missing or invalid fields: ${missing.join(", ")}` });
     }
 
-    // Debug: Log request payload
+    // Map and validate payment method
+    const mappedPayment = mapPaymentMethod(paymentMethod);
+    if (!mappedPayment) {
+      return res.status(400).json({ success: false, message: `Invalid paymentMethod: ${paymentMethod}` });
+    }
+
+    // Idempotency key: prefer header, then body, else generate
+    const headerIdempotencyKey = req.headers['idempotency-key'] || req.headers['Idempotency-Key'];
+    const idempotencyKey = headerIdempotencyKey || bodyIdempotencyKey || crypto.randomBytes(16).toString('hex');
+
+    // Debug: Log request payload (don't log tokens)
     console.log("Checkout request payload:", {
       customerEmail,
       customerName: name,
@@ -48,40 +121,34 @@ app.post("/api/checkout", async (req, res) => {
       totalCost,
       address,
       paymentId,
-      paymentMethod,
-      transactionStatus: "paid"
+      paymentMethod: mappedPayment,
+      transactionStatus: "paid",
+      idempotencyKey
     });
 
-    // Save transaction details to Strapi
-    const strapiToken = process.env.STRAPI_API_TOKEN;
-    console.log("Using Strapi API Token:", strapiToken);
-    if (!strapiToken) {
+    // Save transaction details to Strapi (with retries)
+    if (!STRAPI_TOKEN) {
       return res.status(500).json({ success: false, message: "Strapi API token not set." });
     }
+    const payload = {
+      customerEmail,
+      customerName: name,
+      cart,
+      totalCost,
+      address,
+      paymentId,
+      paymentMethod: mappedPayment,
+      transactionStatus: "paid"
+    };
+
     let strapiRes;
     try {
-      strapiRes = await axios.post(
-        "https://admin.kaalikacreations.com/api/orders",
-        {
-          data: {
-            customerEmail,
-            customerName: name,
-            cart,
-            totalCost,
-            address,
-            paymentId,
-            paymentMethod,
-            transactionStatus: "paid"
-          }
-        },
-        { headers: { Authorization: `Bearer ${strapiToken}` } }
-      );
+      strapiRes = await postToStrapi(payload, idempotencyKey, 3);
     } catch (err) {
-      // Debug: Log full error response from Strapi
+      // Log masked information only
       if (err.response) {
         console.error("Strapi save error status:", err.response.status);
         console.error("Strapi save error data:", JSON.stringify(err.response.data, null, 2));
-        console.error("Strapi save error headers:", err.response.headers);
       } else {
         console.error("Strapi save error:", err.message);
       }
@@ -153,7 +220,17 @@ app.post("/api/send-invoice", async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to send invoice." });
   }
 });
-// Start server
-app.listen(PORT, () => {
-  console.log(`Checkout service running on http://localhost:${PORT}`);
-});
+// Start server only when run directly
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Checkout service running on http://localhost:${PORT}`);
+  });
+}
+
+// Export for testing
+module.exports = {
+  app,
+  mapPaymentMethod,
+  postToStrapi,
+  maskToken
+};
