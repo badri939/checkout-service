@@ -6,6 +6,7 @@ const sendgrid = require("@sendgrid/mail");
 const cors = require("cors");
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
+const rateLimit = require('express-rate-limit');
 const corsOptions = {
   origin: [
     "https://kaalikacreations.com",
@@ -34,9 +35,73 @@ function maskToken(token) {
   if (token.length <= 8) return '****';
   return token.slice(0, 4) + '...' + token.slice(-4);
 }
+
+// Security validation for environment variables
+function validateEnvironment() {
+  const requiredForProduction = [
+    'STRAPI_API_TOKEN',
+    'SENDGRID_API_KEY'
+  ];
+  
+  const requiredForRazorpay = [
+    'RAZORPAY_KEY_ID', 
+    'RAZORPAY_KEY_SECRET'
+  ];
+
+  // Check if we're in production
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  // Validate Strapi and SendGrid keys
+  const missingRequired = requiredForProduction.filter(key => !process.env[key]);
+  if (missingRequired.length > 0 && isProduction) {
+    console.warn(`⚠️  Missing required environment variables: ${missingRequired.join(', ')}`);
+  }
+
+  // Check Razorpay configuration
+  const hasRazorpayKeys = requiredForRazorpay.every(key => process.env[key]);
+  if (!hasRazorpayKeys) {
+    console.log("🔑 Razorpay not configured - payment features will be limited");
+  } else {
+    console.log("🔑 Razorpay configured:", maskToken(process.env.RAZORPAY_KEY_ID));
+  }
+
+  // Security warnings for weak configurations
+  if (process.env.RAZORPAY_KEY_SECRET && process.env.RAZORPAY_KEY_SECRET.length < 10) {
+    console.warn("⚠️  Razorpay secret appears too short - check configuration");
+  }
+
+  return {
+    razorpayConfigured: hasRazorpayKeys,
+    productionReady: missingRequired.length === 0
+  };
+}
+
+const envStatus = validateEnvironment();
 console.log("Using Strapi API Token:", maskToken(STRAPI_TOKEN));
 
+// Security: Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes  
+  max: 10, // Limit payment endpoints to 10 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many payment requests, please try again later.'
+  }
+});
+
 // Middleware
+app.use(limiter); // Apply rate limiting to all requests
 app.use(cors(corsOptions));
 app.use(bodyParser.json());
 
@@ -44,7 +109,7 @@ app.use(bodyParser.json());
 sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
 
 // Create Razorpay order
-app.post("/api/create-order", async (req, res) => {
+app.post("/api/create-order", strictLimiter, async (req, res) => {
   try {
     if (!razorpay) {
       return res.status(500).json({ 
@@ -204,7 +269,7 @@ async function postToStrapi(payload, idempotencyKey, maxRetries = 3) {
   }
 }
 
-app.post("/api/checkout", async (req, res) => {
+app.post("/api/checkout", strictLimiter, async (req, res) => {
   try {
     const { 
       cart, 
