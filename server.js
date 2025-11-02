@@ -5,6 +5,8 @@ const bodyParser = require("body-parser");
 const sendgrid = require("@sendgrid/mail");
 const cors = require("cors");
 const crypto = require('crypto');
+const Razorpay = require('razorpay');
+const rateLimit = require('express-rate-limit');
 const corsOptions = {
   origin: [
     "https://kaalikacreations.com",
@@ -19,34 +21,212 @@ const PORT = 4000;
 const STRAPI_TOKEN = process.env.STRAPI_API_TOKEN;
 const STRAPI_BASE = process.env.STRAPI_BASE_URL || 'https://admin.kaalikacreations.com';
 
+// Initialize Razorpay (only if credentials are provided)
+let razorpay = null;
+if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+  razorpay = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+}
+
 function maskToken(token) {
   if (!token || typeof token !== 'string') return 'NO_TOKEN';
   if (token.length <= 8) return '****';
   return token.slice(0, 4) + '...' + token.slice(-4);
 }
+
+// Security validation for environment variables
+function validateEnvironment() {
+  const requiredForProduction = [
+    'STRAPI_API_TOKEN',
+    'SENDGRID_API_KEY'
+  ];
+  
+  const requiredForRazorpay = [
+    'RAZORPAY_KEY_ID', 
+    'RAZORPAY_KEY_SECRET'
+  ];
+
+  // Check if we're in production
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  // Validate Strapi and SendGrid keys
+  const missingRequired = requiredForProduction.filter(key => !process.env[key]);
+  if (missingRequired.length > 0 && isProduction) {
+    console.warn(`⚠️  Missing required environment variables: ${missingRequired.join(', ')}`);
+  }
+
+  // Check Razorpay configuration
+  const hasRazorpayKeys = requiredForRazorpay.every(key => process.env[key]);
+  if (!hasRazorpayKeys) {
+    console.log("🔑 Razorpay not configured - payment features will be limited");
+  } else {
+    console.log("🔑 Razorpay configured:", maskToken(process.env.RAZORPAY_KEY_ID));
+  }
+
+  // Security warnings for weak configurations
+  if (process.env.RAZORPAY_KEY_SECRET && process.env.RAZORPAY_KEY_SECRET.length < 10) {
+    console.warn("⚠️  Razorpay secret appears too short - check configuration");
+  }
+
+  return {
+    razorpayConfigured: hasRazorpayKeys,
+    productionReady: missingRequired.length === 0
+  };
+}
+
+const envStatus = validateEnvironment();
 console.log("Using Strapi API Token:", maskToken(STRAPI_TOKEN));
 
+// Security: Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes  
+  max: 10, // Limit payment endpoints to 10 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many payment requests, please try again later.'
+  }
+});
+
 // Middleware
+app.use(limiter); // Apply rate limiting to all requests
 app.use(cors(corsOptions));
 app.use(bodyParser.json());
 
 // Configure SendGrid
 sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
 
+// Create Razorpay order
+app.post("/api/create-order", strictLimiter, async (req, res) => {
+  try {
+    if (!razorpay) {
+      return res.status(500).json({ 
+        success: false, 
+        message: "Razorpay not configured. Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET." 
+      });
+    }
+
+    const { amount, currency = "INR", receipt } = req.body;
+    
+    if (!amount) {
+      return res.status(400).json({ success: false, message: "Amount is required" });
+    }
+
+    const options = {
+      amount: amount * 100, // Razorpay expects amount in paise
+      currency: currency,
+      receipt: receipt || `receipt_${Date.now()}`,
+    };
+
+    const order = await razorpay.orders.create(options);
+    
+    res.json({
+      success: true,
+      order: {
+        id: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        receipt: order.receipt
+      }
+    });
+  } catch (error) {
+    console.error("Order creation error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Failed to create order",
+      error: error.message 
+    });
+  }
+});
+
 // Updated checkout route with new validation
-// Map client payment values to Strapi enum values
+// Map client payment values to Strapi enum values (including Razorpay methods)
 function mapPaymentMethod(clientValue) {
-  const map = {
+  const clientToStrapi = {
     'credit-card': 'Card',
+    'debit-card': 'Card',
+    'card': 'Card',
+    'upi': 'UPI',
+    'netbanking': 'Net Banking',
+    'wallet': 'Wallet',
     'paypal': 'Paypal',
-    'cod': 'Cash on Delivery'
+    'cod': 'Cash on Delivery',
+    // Razorpay specific method names
+    'razorpay': 'Razorpay',
+    'gpay': 'UPI',
+    'phonepe': 'UPI',
+    'paytm': 'Wallet'
   };
-  return map[clientValue];
+  
+  const strapiToClient = {
+    'Card': 'Card',
+    'UPI': 'UPI',
+    'Net Banking': 'Net Banking',
+    'Wallet': 'Wallet',
+    'Paypal': 'Paypal',
+    'Cash on Delivery': 'Cash on Delivery',
+    'Razorpay': 'Razorpay'
+  };
+  
+  // First try client-to-strapi mapping
+  if (clientToStrapi[clientValue]) {
+    return clientToStrapi[clientValue];
+  }
+  
+  // If that fails, check if it's already a Strapi value
+  if (strapiToClient[clientValue]) {
+    return strapiToClient[clientValue];
+  }
+  
+  return undefined;
 }
 
 // Helper: sleep for ms
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Verify Razorpay payment signature
+function verifyRazorpaySignature(orderId, paymentId, signature) {
+  try {
+    const text = orderId + "|" + paymentId;
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(text.toString())
+      .digest("hex");
+    
+    return expectedSignature === signature;
+  } catch (error) {
+    console.error("Signature verification error:", error);
+    return false;
+  }
+}
+
+// Fetch payment details from Razorpay
+async function fetchRazorpayPayment(paymentId) {
+  if (!razorpay) {
+    throw new Error("Razorpay not configured");
+  }
+  
+  try {
+    const payment = await razorpay.payments.fetch(paymentId);
+    return payment;
+  } catch (error) {
+    console.error("Error fetching Razorpay payment:", error);
+    throw error;
+  }
 }
 
 // Determine if error is transient (network error or 5xx)
@@ -89,9 +269,20 @@ async function postToStrapi(payload, idempotencyKey, maxRetries = 3) {
   }
 }
 
-app.post("/api/checkout", async (req, res) => {
+app.post("/api/checkout", strictLimiter, async (req, res) => {
   try {
-    const { cart, totalCost, name, address, paymentMethod, customerEmail, paymentId, idempotencyKey: bodyIdempotencyKey } = req.body;
+    const { 
+      cart, 
+      totalCost, 
+      name, 
+      address, 
+      paymentMethod, 
+      customerEmail, 
+      paymentId, 
+      razorpayOrderId, 
+      signature,
+      idempotencyKey: bodyIdempotencyKey 
+    } = req.body;
     let missing = [];
     if (!cart) missing.push("cart");
     if (!Array.isArray(cart)) missing.push("cart (must be an array)");
@@ -107,6 +298,40 @@ app.post("/api/checkout", async (req, res) => {
     const mappedPayment = mapPaymentMethod(paymentMethod);
     if (!mappedPayment) {
       return res.status(400).json({ success: false, message: `Invalid paymentMethod: ${paymentMethod}` });
+    }
+
+    // Verify Razorpay payment if payment details are provided
+    if (paymentId && razorpayOrderId && signature) {
+      const isValidSignature = verifyRazorpaySignature(razorpayOrderId, paymentId, signature);
+      if (!isValidSignature) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Invalid payment signature. Payment verification failed." 
+        });
+      }
+
+      // Optionally fetch payment details from Razorpay for additional verification
+      try {
+        const paymentDetails = await fetchRazorpayPayment(paymentId);
+        if (paymentDetails.status !== 'captured' && paymentDetails.status !== 'authorized') {
+          return res.status(400).json({ 
+            success: false, 
+            message: "Payment not successful. Please try again." 
+          });
+        }
+        console.log("Payment verified successfully:", {
+          paymentId: paymentDetails.id,
+          status: paymentDetails.status,
+          amount: paymentDetails.amount / 100, // Convert from paise to rupees
+          method: paymentDetails.method
+        });
+      } catch (error) {
+        console.error("Payment verification error:", error);
+        return res.status(400).json({ 
+          success: false, 
+          message: "Unable to verify payment. Please contact support." 
+        });
+      }
     }
 
     // Idempotency key: prefer header, then body, else generate
@@ -173,6 +398,54 @@ app.post("/api/checkout", async (req, res) => {
   }
 });
 
+// Razorpay webhook endpoint
+app.post("/api/razorpay/webhook", async (req, res) => {
+  try {
+    const webhookSignature = req.headers['x-razorpay-signature'];
+    const webhookBody = JSON.stringify(req.body);
+    
+    // Verify webhook signature
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET)
+      .update(webhookBody)
+      .digest('hex');
+    
+    if (webhookSignature !== expectedSignature) {
+      console.error("Invalid webhook signature");
+      return res.status(400).json({ success: false, message: "Invalid signature" });
+    }
+
+    const event = req.body.event;
+    const paymentEntity = req.body.payload.payment.entity;
+    
+    console.log("Razorpay webhook received:", {
+      event: event,
+      paymentId: paymentEntity.id,
+      status: paymentEntity.status,
+      amount: paymentEntity.amount / 100
+    });
+
+    // Handle different webhook events
+    switch (event) {
+      case 'payment.captured':
+        // Payment was successfully captured
+        console.log(`Payment captured: ${paymentEntity.id}`);
+        break;
+      case 'payment.failed':
+        // Payment failed
+        console.log(`Payment failed: ${paymentEntity.id}`);
+        break;
+      default:
+        console.log(`Unhandled webhook event: ${event}`);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Webhook processing error:", error);
+    res.status(500).json({ success: false, message: "Webhook processing failed" });
+  }
+});
+
 // Custom checkout endpoint
 app.post("/api/checkout/custom", async (req, res) => {
   try {
@@ -232,5 +505,7 @@ module.exports = {
   app,
   mapPaymentMethod,
   postToStrapi,
-  maskToken
+  maskToken,
+  verifyRazorpaySignature,
+  fetchRazorpayPayment
 };

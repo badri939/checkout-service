@@ -14,9 +14,10 @@
     "@sendgrid/mail": "^8.1.5",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
-    "express": "^5.1.0"
-  }
-  ,
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.2.1",
+    "razorpay": "^2.9.6"
+  },
   "devDependencies": {
     "chai": "^4.3.7",
     "mocha": "^10.2.0",
