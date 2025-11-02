@@ -19,4 +19,17 @@ describe('mapPaymentMethod', () => {
   it('returns undefined for unknown method', () => {
     expect(mapPaymentMethod('bitcoin')).to.be.undefined;
   });
+
+  // Test that Strapi values also work (bidirectional mapping)
+  it('accepts Card and returns Card', () => {
+    expect(mapPaymentMethod('Card')).to.equal('Card');
+  });
+
+  it('accepts Paypal and returns Paypal', () => {
+    expect(mapPaymentMethod('Paypal')).to.equal('Paypal');
+  });
+
+  it('accepts Cash on Delivery and returns Cash on Delivery', () => {
+    expect(mapPaymentMethod('Cash on Delivery')).to.equal('Cash on Delivery');
+  });
 });

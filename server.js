@@ -36,12 +36,29 @@ sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
 // Updated checkout route with new validation
 // Map client payment values to Strapi enum values
 function mapPaymentMethod(clientValue) {
-  const map = {
+  const clientToStrapi = {
     'credit-card': 'Card',
     'paypal': 'Paypal',
     'cod': 'Cash on Delivery'
   };
-  return map[clientValue];
+  
+  const strapiToClient = {
+    'Card': 'Card',
+    'Paypal': 'Paypal',
+    'Cash on Delivery': 'Cash on Delivery'
+  };
+  
+  // First try client-to-strapi mapping
+  if (clientToStrapi[clientValue]) {
+    return clientToStrapi[clientValue];
+  }
+  
+  // If that fails, check if it's already a Strapi value
+  if (strapiToClient[clientValue]) {
+    return strapiToClient[clientValue];
+  }
+  
+  return undefined;
 }
 
 // Helper: sleep for ms
