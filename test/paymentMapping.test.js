@@ -32,4 +32,29 @@ describe('mapPaymentMethod', () => {
   it('accepts Cash on Delivery and returns Cash on Delivery', () => {
     expect(mapPaymentMethod('Cash on Delivery')).to.equal('Cash on Delivery');
   });
+
+  // Test Razorpay payment methods
+  it('maps upi to UPI', () => {
+    expect(mapPaymentMethod('upi')).to.equal('UPI');
+  });
+
+  it('maps netbanking to Net Banking', () => {
+    expect(mapPaymentMethod('netbanking')).to.equal('Net Banking');
+  });
+
+  it('maps wallet to Wallet', () => {
+    expect(mapPaymentMethod('wallet')).to.equal('Wallet');
+  });
+
+  it('maps razorpay to Razorpay', () => {
+    expect(mapPaymentMethod('razorpay')).to.equal('Razorpay');
+  });
+
+  it('maps gpay to UPI', () => {
+    expect(mapPaymentMethod('gpay')).to.equal('UPI');
+  });
+
+  it('accepts UPI and returns UPI', () => {
+    expect(mapPaymentMethod('UPI')).to.equal('UPI');
+  });
 });
