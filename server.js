@@ -7,6 +7,8 @@ const cors = require("cors");
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const rateLimit = require('express-rate-limit');
+const fs = require('fs');
+const path = require('path');
 const corsOptions = {
   origin: [
     "https://kaalikacreations.com",
@@ -17,7 +19,7 @@ const corsOptions = {
 };
 
 const app = express();
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 const STRAPI_TOKEN = process.env.STRAPI_API_TOKEN;
 const STRAPI_BASE = process.env.STRAPI_BASE_URL || 'https://admin.kaalikacreations.com';
 
@@ -103,7 +105,12 @@ const strictLimiter = rateLimit({
 // Middleware
 app.use(limiter); // Apply rate limiting to all requests
 app.use(cors(corsOptions));
-app.use(bodyParser.json());
+// Capture raw body for webhook signature verification while still parsing JSON
+app.use(bodyParser.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 
 // Configure SendGrid
 sendgrid.setApiKey(process.env.SENDGRID_API_KEY);
@@ -118,7 +125,7 @@ app.post("/api/create-order", strictLimiter, async (req, res) => {
       });
     }
 
-    const { amount, currency = "INR", receipt } = req.body;
+    const { amount, currency = "INR", receipt, cart, customerEmail, customerName } = req.body;
     
     if (!amount) {
       return res.status(400).json({ success: false, message: "Amount is required" });
@@ -132,6 +139,32 @@ app.post("/api/create-order", strictLimiter, async (req, res) => {
 
     const order = await razorpay.orders.create(options);
     
+    // Create a provisional order in Strapi that includes the Razorpay order id
+    // so webhooks can deterministically find and update the order later.
+    const headerIdempotencyKey = req.headers['idempotency-key'] || req.headers['Idempotency-Key'];
+    const idempotencyKey = headerIdempotencyKey || crypto.randomBytes(16).toString('hex');
+
+    if (STRAPI_TOKEN) {
+      const strapiPayload = {
+        customerEmail: customerEmail || null,
+        customerName: customerName || null,
+        cart: cart || [],
+        totalCost: amount,
+        razorpayOrderId: order.id,
+        transactionStatus: 'pending'
+      };
+
+      try {
+        await postToStrapi(strapiPayload, idempotencyKey, 2);
+        console.log('Provisional Strapi order created for Razorpay order', order.id);
+      } catch (err) {
+        // Don't fail the Razorpay order creation if Strapi write fails; log and continue
+        console.error('Failed to create provisional Strapi order:', err?.response?.data || err.message || err);
+      }
+    } else {
+      console.warn('STRAPI_API_TOKEN not set — skipping provisional Strapi order creation');
+    }
+
     res.json({
       success: true,
       order: {
@@ -269,6 +302,100 @@ async function postToStrapi(payload, idempotencyKey, maxRetries = 3) {
   }
 }
 
+// --- Persistent webhook dedupe store (Strapi-backed with local-file fallback) ---
+const DATA_DIR = path.join(__dirname, 'data');
+const WEBHOOK_STORE_FILE = path.join(DATA_DIR, 'processed_webhooks.json');
+let processedWebhookSet = new Set();
+
+function ensureDataDirSync() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (e) {
+    // ignore
+  }
+}
+
+function loadProcessedWebhooksSync() {
+  try {
+    ensureDataDirSync();
+    if (fs.existsSync(WEBHOOK_STORE_FILE)) {
+      const content = fs.readFileSync(WEBHOOK_STORE_FILE, 'utf8');
+      const arr = JSON.parse(content || '[]');
+      processedWebhookSet = new Set(Array.isArray(arr) ? arr : []);
+    } else {
+      fs.writeFileSync(WEBHOOK_STORE_FILE, JSON.stringify([]), 'utf8');
+      processedWebhookSet = new Set();
+    }
+  } catch (err) {
+    console.error('Could not load processed webhooks file, starting with empty set:', err.message || err);
+    processedWebhookSet = new Set();
+  }
+}
+
+async function persistProcessedWebhooks() {
+  try {
+    ensureDataDirSync();
+    await fs.promises.writeFile(WEBHOOK_STORE_FILE, JSON.stringify([...processedWebhookSet]), 'utf8');
+  } catch (err) {
+    console.error('Failed to persist processed webhooks file:', err.message || err);
+  }
+}
+
+/**
+ * Check whether a webhook with the given eventId has already been processed.
+ * First tries to query Strapi `webhook-events` (if STRAPI_TOKEN present), else falls back to local file.
+ */
+async function isWebhookProcessed(eventId) {
+  if (!eventId) return false;
+  // Try Strapi first
+  if (STRAPI_TOKEN) {
+    try {
+      const headers = { Authorization: `Bearer ${STRAPI_TOKEN}` };
+      const url = `${STRAPI_BASE}/api/webhook-events?filters[eventId][$eq]=${encodeURIComponent(eventId)}`;
+      const resp = await axios.get(url, { headers });
+      if (resp.data && resp.data.data && resp.data.data.length > 0) return true;
+    } catch (err) {
+      // If Strapi doesn't have the content-type or is unavailable, fallback to local store
+      console.log('Strapi webhook-events lookup failed or not available, falling back to local webhook store');
+    }
+  }
+  return processedWebhookSet.has(eventId);
+}
+
+/**
+ * Mark a webhook as processed. Attempts to create a Strapi `webhook-events` record first,
+ * and falls back to a local file-based store if that fails.
+ */
+async function markWebhookProcessed(eventId, rawEvent) {
+  if (!eventId) return;
+  if (STRAPI_TOKEN) {
+    try {
+      const headers = { Authorization: `Bearer ${STRAPI_TOKEN}` };
+      const payload = {
+        eventId,
+        receivedAt: new Date().toISOString(),
+        payload: rawEvent
+      };
+      await axios.post(`${STRAPI_BASE}/api/webhook-events`, { data: payload }, { headers });
+      return;
+    } catch (err) {
+      console.log('Creating Strapi webhook-event failed, will persist locally instead');
+    }
+  }
+
+  // Local fallback
+  try {
+    processedWebhookSet.add(eventId);
+    await persistProcessedWebhooks();
+  } catch (err) {
+    console.error('Failed to mark webhook as processed in local store:', err.message || err);
+  }
+}
+
+// Load local processed webhook IDs on startup
+loadProcessedWebhooksSync();
+
+
 app.post("/api/checkout", strictLimiter, async (req, res) => {
   try {
     const { 
@@ -399,50 +526,175 @@ app.post("/api/checkout", strictLimiter, async (req, res) => {
 });
 
 // Razorpay webhook endpoint
+// Razorpay webhook endpoint — verifies signature from raw body, updates Strapi order and decrements stock
 app.post("/api/razorpay/webhook", async (req, res) => {
   try {
-    const webhookSignature = req.headers['x-razorpay-signature'];
-    const webhookBody = JSON.stringify(req.body);
-    
-    // Verify webhook signature
-    const expectedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET)
-      .update(webhookBody)
-      .digest('hex');
-    
-    if (webhookSignature !== expectedSignature) {
-      console.error("Invalid webhook signature");
-      return res.status(400).json({ success: false, message: "Invalid signature" });
+    const signatureHeader = req.headers['x-razorpay-signature'];
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body));
+
+    if (!signatureHeader) {
+      console.error('Missing razorpay signature header');
+      return res.status(400).json({ success: false, message: 'Missing signature' });
     }
 
-    const event = req.body.event;
-    const paymentEntity = req.body.payload.payment.entity;
-    
-    console.log("Razorpay webhook received:", {
-      event: event,
-      paymentId: paymentEntity.id,
-      status: paymentEntity.status,
-      amount: paymentEntity.amount / 100
-    });
+    const expected = crypto
+      .createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET)
+      .update(rawBody)
+      .digest('hex');
 
-    // Handle different webhook events
-    switch (event) {
-      case 'payment.captured':
-        // Payment was successfully captured
-        console.log(`Payment captured: ${paymentEntity.id}`);
-        break;
-      case 'payment.failed':
-        // Payment failed
-        console.log(`Payment failed: ${paymentEntity.id}`);
-        break;
-      default:
-        console.log(`Unhandled webhook event: ${event}`);
+    // timing-safe comparison
+    const sigBuf = Buffer.from(signatureHeader);
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      console.error('Invalid webhook signature');
+      return res.status(400).json({ success: false, message: 'Invalid signature' });
+    }
+
+    const event = JSON.parse(rawBody.toString());
+    const eventName = event.event;
+    const paymentEntity = event.payload && event.payload.payment && event.payload.payment.entity;
+    if (!paymentEntity) {
+      console.log('Webhook received with no payment entity');
+      return res.status(200).json({ success: true });
+    }
+
+    // Use a stable dedupe key: prefer a provider-supplied event id, else fall back to eventType:paymentId
+    const dedupeId = event.id || `${eventName}:${paymentEntity.id}`;
+    try {
+      if (await isWebhookProcessed(dedupeId)) {
+        console.log('Duplicate webhook ignored:', dedupeId);
+        return res.status(200).json({ success: true, duplicate: true });
+      }
+    } catch (err) {
+      console.error('Error checking webhook dedupe store, continuing processing:', err?.message || err);
+    }
+
+    console.log('Razorpay webhook received:', { event: eventName, paymentId: paymentEntity.id, status: paymentEntity.status });
+
+    // Helper: find order in Strapi by paymentId or razorpay order id
+    async function findStrapiOrderByPayment(paymentId, razorpayOrderId) {
+      const base = STRAPI_BASE;
+      const headers = { Authorization: `Bearer ${STRAPI_TOKEN}` };
+      try {
+        // Try by paymentId
+        if (paymentId) {
+          const url = `${base}/api/orders?filters[paymentId][$eq]=${paymentId}&populate=deep`;
+          const resp = await axios.get(url, { headers });
+          if (resp.data && resp.data.data && resp.data.data.length > 0) return resp.data.data[0];
+        }
+        // Try by razorpay order id
+        if (razorpayOrderId) {
+          const url2 = `${base}/api/orders?filters[razorpayOrderId][$eq]=${razorpayOrderId}&populate=deep`;
+          const resp2 = await axios.get(url2, { headers });
+          if (resp2.data && resp2.data.data && resp2.data.data.length > 0) return resp2.data.data[0];
+        }
+      } catch (err) {
+        console.error('Error searching Strapi for order:', err?.response?.data || err.message || err);
+      }
+      return null;
+    }
+
+    // Helper: update product stock in Strapi if product field exists
+    async function decrementProductStock(productId, qty) {
+      const headers = { Authorization: `Bearer ${STRAPI_TOKEN}` };
+      try {
+        const url = `${STRAPI_BASE}/api/products/${productId}?populate=deep`;
+        const resp = await axios.get(url, { headers });
+        const product = resp.data && resp.data.data;
+        if (!product) return false;
+        const attrs = product.attributes || {};
+        // common stock field names
+        const stockFields = ['stock', 'quantity', 'inventory', 'available'];
+        let fieldName = null;
+        for (const f of stockFields) {
+          if (typeof attrs[f] === 'number') {
+            fieldName = f;
+            break;
+          }
+        }
+        if (!fieldName) {
+          console.log(`No numeric stock field found on product ${productId}`);
+          return false;
+        }
+        const current = attrs[fieldName];
+        const updated = Math.max(0, current - qty);
+        const patchUrl = `${STRAPI_BASE}/api/products/${productId}`;
+        await axios.put(patchUrl, { data: { [fieldName]: updated } }, { headers });
+        console.log(`Product ${productId} stock updated: ${current} -> ${updated}`);
+        return true;
+      } catch (err) {
+        console.error('Error decrementing product stock:', err?.response?.data || err.message || err);
+        return false;
+      }
+    }
+
+    const paymentId = paymentEntity.id;
+    const rzpOrderId = paymentEntity.order_id;
+    const status = paymentEntity.status;
+
+    // Find existing order in Strapi
+    let strapiOrder = null;
+    if (STRAPI_TOKEN) {
+      strapiOrder = await findStrapiOrderByPayment(paymentId, rzpOrderId);
+    }
+
+    // If order exists, update status; else create a new order record in Strapi
+    if (strapiOrder) {
+      const orderId = strapiOrder.id;
+      const updatePayload = {
+        transactionStatus: status === 'captured' ? 'paid' : status,
+        paymentId: paymentId,
+        razorpayOrderId: rzpOrderId
+      };
+      try {
+        const url = `${STRAPI_BASE}/api/orders/${orderId}`;
+        await axios.put(url, { data: updatePayload }, { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` } });
+        console.log(`Strapi order ${orderId} updated with payment status ${status}`);
+
+        // If payment captured, decrement stock for items in order.cart
+        if (status === 'captured') {
+          const cart = (strapiOrder.attributes && strapiOrder.attributes.cart) || strapiOrder.cart || [];
+          for (const item of cart) {
+            const productId = item.productId || (item.product && item.product.id) || item.product_id;
+            const quantity = item.quantity || item.qty || 1;
+            if (productId) {
+              await decrementProductStock(productId, quantity);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to update Strapi order:', err?.response?.data || err.message || err);
+      }
+    } else if (STRAPI_TOKEN) {
+      // Create a minimal order record in Strapi with payment details
+      const payload = {
+        customerEmail: paymentEntity.email || null,
+        customerName: paymentEntity.contact || null,
+        cart: [],
+        totalCost: (paymentEntity.amount || 0) / 100,
+        paymentId: paymentId,
+        razorpayOrderId: rzpOrderId,
+        transactionStatus: status === 'captured' ? 'paid' : status
+      };
+      try {
+        await postToStrapi(payload, null, 2);
+        console.log('Created Strapi order from webhook payment');
+      } catch (err) {
+        console.error('Failed to create Strapi order from webhook:', err?.response?.data || err.message || err);
+      }
+    }
+
+    // Mark event as processed (best-effort) to prevent duplicate processing on retries
+    try {
+      await markWebhookProcessed(dedupeId, event);
+    } catch (err) {
+      console.error('Failed to mark webhook processed (non-fatal):', err?.message || err);
     }
 
     res.json({ success: true });
   } catch (error) {
-    console.error("Webhook processing error:", error);
-    res.status(500).json({ success: false, message: "Webhook processing failed" });
+    console.error('Webhook processing error:', error?.response?.data || error.message || error);
+    res.status(500).json({ success: false, message: 'Webhook processing failed' });
   }
 });
 
