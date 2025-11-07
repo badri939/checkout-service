@@ -666,12 +666,38 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       return null;
     }
 
+    // Helper: Sanitize customer name for Razorpay (only letters, spaces, dots, hyphens)
+    function sanitizeName(name) {
+      if (!name) return null;
+      // Razorpay accepts: letters (any language), spaces, dots, hyphens, apostrophes
+      // Remove special characters, trim, and limit length
+      const cleaned = name
+        .replace(/[^\p{L}\s\.\-']/gu, '') // Remove non-letter/space/dot/hyphen/apostrophe
+        .trim()
+        .substring(0, 100); // Max 100 chars
+      
+      // Must have at least 3 characters and not be all spaces
+      if (cleaned.length < 3 || /^\s*$/.test(cleaned)) {
+        return null;
+      }
+      return cleaned;
+    }
+
     // Build customer info
+    const rawName = (strapiOrder && (strapiOrder.attributes && strapiOrder.attributes.customerName)) || paymentEntity.name || paymentEntity.contact || null;
+    const sanitizedName = sanitizeName(rawName);
+    
     const customer = {
-      name: (strapiOrder && (strapiOrder.attributes && strapiOrder.attributes.customerName)) || paymentEntity.name || paymentEntity.contact || null,
       email: (strapiOrder && (strapiOrder.attributes && strapiOrder.attributes.customerEmail)) || paymentEntity.email || null,
       contact: paymentEntity.contact || null
     };
+    
+    // Only add name if valid (Razorpay rejects invalid names)
+    if (sanitizedName) {
+      customer.name = sanitizedName;
+    } else if (rawName) {
+      console.warn('⚠️  Customer name invalid for Razorpay:', rawName, '- proceeding without name');
+    }
 
     // Build line items from Strapi cart if available, else a single item representing total
     let line_items = [];
