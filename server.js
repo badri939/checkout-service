@@ -733,19 +733,31 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       line_items,
       currency: (paymentEntity.currency || 'INR'),
       description: `Invoice for Payment ${paymentEntity.id}`,
-      // Let Razorpay send the email if it recognizes the customer email
-      email_notify: customer.email ? 1 : 0,
-      sms_notify: customer.contact ? 0 : 0,
-      // Mark as paid since payment already captured
-      paid: true
+      // Don't auto-notify on creation - we'll issue it first
+      email_notify: 0,
+      sms_notify: 0
     };
 
     try {
       const auth = { username: process.env.RAZORPAY_KEY_ID, password: process.env.RAZORPAY_KEY_SECRET };
+      
+      // Step 1: Create invoice in draft state
       const resp = await axios.post(`${RAZORPAY_API_BASE}/v1/invoices`, invoicePayload, { auth });
       if (resp && resp.data) {
         const invoice = resp.data;
-        console.log('✅ Razorpay invoice created successfully:', invoice && invoice.id);
+        console.log('✅ Razorpay invoice created (draft):', invoice && invoice.id);
+        
+        // Step 2: Issue the invoice (finalizes it and sends to customer)
+        try {
+          const issueResp = await axios.post(
+            `${RAZORPAY_API_BASE}/v1/invoices/${invoice.id}/issue`,
+            {},
+            { auth }
+          );
+          console.log('✅ Invoice issued successfully:', invoice.id);
+        } catch (issueErr) {
+          console.warn('⚠️  Could not issue invoice (might need manual issuing):', issueErr?.response?.data || issueErr.message);
+        }
 
         // If invoice has a short_url or id, attach to Strapi order (best-effort)
         try {
