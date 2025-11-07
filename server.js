@@ -886,13 +886,16 @@ app.post("/api/razorpay/webhook", async (req, res) => {
                 const foundOrder = await findStrapiOrderByPayment(paymentEntity.id, paymentEntity.order_id);
                 if (foundOrder && foundOrder.id) {
                   console.log('✅ Found order by payment ID:', foundOrder.id);
+                  console.log('📋 Found order structure:', JSON.stringify(foundOrder).substring(0, 300));
                   const retryUrl = `${STRAPI_BASE}/api/orders/${foundOrder.id}`;
+                  console.log('🔄 Retrying update at:', retryUrl);
                   await axios.put(retryUrl, { data: update }, { 
                     headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
                   });
                   console.log('✅ Attached invoice info to Strapi order (retry)', foundOrder.id);
                 } else {
-                  throw updateErr;
+                  console.error('⚠️  Could not find order by payment ID - skipping Strapi update');
+                  // Don't throw - invoice already created successfully
                 }
               }
             }
