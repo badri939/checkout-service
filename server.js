@@ -722,8 +722,14 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       line_items = [{ name: 'Order Total', quantity: 1, unit_cost: Math.round(total * 100) }];
     }
 
+    // Calculate total amount from line items
+    const totalAmount = line_items.reduce((sum, item) => {
+      return sum + (item.unit_cost * item.quantity);
+    }, 0);
+
     const invoicePayload = {
       type: 'invoice',
+      amount: totalAmount, // Required: total invoice amount in paise
       customer: customer,
       line_items,
       currency: (paymentEntity.currency || 'INR'),
