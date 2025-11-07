@@ -722,9 +722,12 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       line_items = [{ name: 'Order Total', quantity: 1, unit_cost: Math.round(total * 100) }];
     }
 
+    // Calculate total amount in paise (Razorpay requires amount field along with line_items)
+    const totalAmount = line_items.reduce((sum, item) => sum + (item.quantity * item.unit_cost), 0);
+
     const invoicePayload = {
       type: 'invoice',
-      // Note: 'amount' field not needed for type 'invoice' - Razorpay calculates from line_items
+      amount: totalAmount, // Amount in paise (required along with line_items)
       customer: customer,
       line_items,
       currency: (paymentEntity.currency || 'INR'),
