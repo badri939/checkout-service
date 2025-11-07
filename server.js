@@ -777,7 +777,9 @@ app.post("/api/razorpay/webhook", async (req, res) => {
         const invoice = resp.data;
         console.log('✅ Razorpay invoice created:', invoice.id);
 
-        // Send custom receipt email via SendGrid
+        // Send custom receipt email via SendGrid (disabled - SendGrid credits exhausted)
+        // TODO: Re-enable when SendGrid credits available or switch to alternative email service
+        /*
         if (customer.email && process.env.SENDGRID_API_KEY) {
           try {
             const totalAmount = createdItems.reduce((sum, item) => {
@@ -850,6 +852,7 @@ app.post("/api/razorpay/webhook", async (req, res) => {
             console.error('❌ Failed to send receipt email:', emailErr?.response?.body || emailErr.message);
           }
         }
+        */
 
         // Update Strapi order with invoice info
         try {
@@ -860,17 +863,27 @@ app.post("/api/razorpay/webhook", async (req, res) => {
             if (!orderId) {
               console.warn('⚠️  Could not extract order ID from strapiOrder:', JSON.stringify(strapiOrder).substring(0, 200));
             } else {
+              // Small delay to ensure order is fully saved in Strapi
+              await new Promise(resolve => setTimeout(resolve, 500));
+              
               const update = { 
                 razorpayInvoiceId: invoice.id, 
                 razorpayInvoiceUrl: invoice.short_url || null,
                 invoiceSentAt: new Date().toISOString()
               };
-              await axios.put(`${STRAPI_BASE}/api/orders/${orderId}`, { data: update }, { headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } });
+              
+              const updateUrl = `${STRAPI_BASE}/api/orders/${orderId}`;
+              console.log('🔄 Updating Strapi order at:', updateUrl);
+              
+              await axios.put(updateUrl, { data: update }, { 
+                headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
+              });
               console.log('✅ Attached invoice info to Strapi order', orderId);
             }
           }
         } catch (err) {
           console.error('❌ Failed to attach invoice info to Strapi order:', err?.response?.data || err.message || err);
+          console.error('   Update URL was:', `${STRAPI_BASE}/api/orders/${strapiOrder?.id}`);
         }
 
         return invoice;
