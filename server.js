@@ -601,13 +601,13 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       try {
         // Try by paymentId
         if (paymentId) {
-          const url = `${base}/api/orders?filters[paymentId][$eq]=${paymentId}&populate=deep`;
+          const url = `${base}/api/orders?filters[paymentId][$eq]=${paymentId}`;
           const resp = await axios.get(url, { headers });
           if (resp.data && resp.data.data && resp.data.data.length > 0) return resp.data.data[0];
         }
         // Try by razorpay order id
         if (razorpayOrderId) {
-          const url2 = `${base}/api/orders?filters[razorpayOrderId][$eq]=${razorpayOrderId}&populate=deep`;
+          const url2 = `${base}/api/orders?filters[razorpayOrderId][$eq]=${razorpayOrderId}`;
           const resp2 = await axios.get(url2, { headers });
           if (resp2.data && resp2.data.data && resp2.data.data.length > 0) return resp2.data.data[0];
         }
@@ -621,7 +621,7 @@ app.post("/api/razorpay/webhook", async (req, res) => {
     async function decrementProductStock(productId, qty) {
       const headers = { Authorization: `Bearer ${STRAPI_TOKEN}` };
       try {
-        const url = `${STRAPI_BASE}/api/products/${productId}?populate=deep`;
+        const url = `${STRAPI_BASE}/api/products/${productId}`;
         const resp = await axios.get(url, { headers });
         const product = resp.data && resp.data.data;
         if (!product) return false;
@@ -864,7 +864,27 @@ app.post("/api/razorpay/webhook", async (req, res) => {
               console.warn('⚠️  Could not extract order ID from strapiOrder:', JSON.stringify(strapiOrder).substring(0, 200));
             } else {
               // Small delay to ensure order is fully saved in Strapi
-              await new Promise(resolve => setTimeout(resolve, 500));
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              
+              // Verify order exists before updating
+              try {
+                const verifyUrl = `${STRAPI_BASE}/api/orders/${orderId}`;
+                const verifyResp = await axios.get(verifyUrl, { 
+                  headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
+                });
+                console.log('✅ Verified order exists:', orderId);
+              } catch (verifyErr) {
+                console.error('❌ Order does not exist at', orderId, '- trying to find by payment ID');
+                // Try to find order by payment ID instead
+                const foundOrder = await findStrapiOrderByPayment(paymentEntity.id, paymentEntity.order_id);
+                if (foundOrder && foundOrder.id) {
+                  console.log('✅ Found order by payment ID:', foundOrder.id);
+                  strapiOrder = foundOrder;
+                  orderId = foundOrder.id;
+                } else {
+                  throw new Error('Order not found in Strapi');
+                }
+              }
               
               const update = { 
                 razorpayInvoiceId: invoice.id, 
