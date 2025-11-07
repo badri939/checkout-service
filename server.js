@@ -877,7 +877,11 @@ app.post("/api/razorpay/webhook", async (req, res) => {
         // Try to create/send invoice using the newly created order
         try {
           const createdOrder = (resp && resp.data && resp.data.data) ? resp.data.data : null;
-          console.log('📄 Attempting to create Razorpay invoice for newly created order');
+          if (createdOrder) {
+            console.log('📄 Attempting to create Razorpay invoice for newly created order (ID:', createdOrder.id || 'MISSING', ')');
+          } else {
+            console.warn('⚠️  No createdOrder extracted from Strapi response');
+          }
           const invoice = await createAndSendRazorpayInvoice({ strapiOrder: createdOrder, paymentEntity });
           if (invoice) {
             console.log('✅ Invoice created for payment (new order):', invoice.id, '- URL:', invoice.short_url);
