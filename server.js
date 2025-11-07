@@ -867,9 +867,13 @@ app.post("/api/razorpay/webhook", async (req, res) => {
               // Small delay to ensure order is fully saved in Strapi
               await new Promise(resolve => setTimeout(resolve, 1000));
               
+              // Generate receipt URL
+              const receiptUrl = `https://checkout-service-mdzx.onrender.com/receipt/${orderId}`;
+              
               const update = { 
                 razorpayInvoiceId: invoice.id, 
                 razorpayInvoiceUrl: invoice.short_url || null,
+                receiptUrl: receiptUrl,
                 invoiceSentAt: new Date().toISOString()
               };
               
@@ -1071,6 +1075,260 @@ app.post("/api/send-invoice", async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to send invoice." });
   }
 });
+
+// Receipt page endpoint - displays payment receipt for customers
+app.get("/receipt/:orderId", async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    
+    if (!STRAPI_TOKEN) {
+      return res.status(500).send("Service configuration error");
+    }
+
+    // Fetch order from Strapi by documentId or numeric ID
+    let order = null;
+    try {
+      const url = `${STRAPI_BASE}/api/orders/${orderId}`;
+      const response = await axios.get(url, { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` } });
+      order = response.data && response.data.data;
+    } catch (err) {
+      return res.status(404).send(`
+        <html><body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
+          <h2>Receipt Not Found</h2>
+          <p>We couldn't find this order receipt. Please contact support if you need assistance.</p>
+        </body></html>
+      `);
+    }
+
+    if (!order) {
+      return res.status(404).send("Order not found");
+    }
+
+    const orderData = order.attributes || order;
+    const cart = orderData.cart || [];
+    const totalCost = orderData.totalCost || 0;
+    const customerName = orderData.customerName || 'Customer';
+    const customerEmail = orderData.customerEmail || '';
+    const paymentId = orderData.paymentId || 'N/A';
+    const transactionStatus = orderData.transactionStatus || 'pending';
+    const createdAt = orderData.createdAt || new Date().toISOString();
+    const razorpayInvoiceUrl = orderData.razorpayInvoiceUrl || null;
+
+    // Generate cart items HTML
+    const cartItemsHtml = cart.map(item => {
+      const itemName = item.name || 'Item';
+      const itemPrice = item.price || 0;
+      const itemQty = item.quantity || 1;
+      const itemTotal = itemPrice * itemQty;
+      return `
+        <tr>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: left;">${itemName}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: center;">${itemQty}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: right;">₹${itemPrice.toFixed(2)}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: right;">₹${itemTotal.toFixed(2)}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const receiptHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Receipt - Kaalika Creations</title>
+        <style>
+          @media print {
+            .no-print { display: none; }
+          }
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+          }
+          .receipt-container {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+          }
+          .header {
+            text-align: center;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+          }
+          .header h1 {
+            margin: 0;
+            color: #333;
+            font-size: 32px;
+          }
+          .header .subtitle {
+            color: #666;
+            margin-top: 5px;
+          }
+          .status-badge {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin: 20px 0;
+          }
+          .info-section {
+            margin: 25px 0;
+          }
+          .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #f0f0f0;
+          }
+          .info-label {
+            font-weight: 600;
+            color: #555;
+          }
+          .info-value {
+            color: #333;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+          }
+          th {
+            background-color: #f8f9fa;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 2px solid #dee2e6;
+          }
+          .total-row {
+            background-color: #f8f9fa;
+            font-weight: bold;
+            font-size: 18px;
+          }
+          .total-row td {
+            padding: 15px 12px !important;
+          }
+          .actions {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 2px solid #e0e0e0;
+          }
+          .btn {
+            display: inline-block;
+            padding: 12px 30px;
+            margin: 0 10px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background-color 0.3s;
+          }
+          .btn-primary {
+            background-color: #4CAF50;
+            color: white;
+          }
+          .btn-primary:hover {
+            background-color: #45a049;
+          }
+          .btn-secondary {
+            background-color: #2196F3;
+            color: white;
+          }
+          .btn-secondary:hover {
+            background-color: #0b7dda;
+          }
+          .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+            color: #666;
+            font-size: 14px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="receipt-container">
+          <div class="header">
+            <h1>🛍️ Kaalika Creations</h1>
+            <div class="subtitle">Payment Receipt</div>
+            <div class="status-badge">✓ PAID</div>
+          </div>
+
+          <div class="info-section">
+            <div class="info-row">
+              <span class="info-label">Receipt Date:</span>
+              <span class="info-value">${new Date(createdAt).toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Customer Name:</span>
+              <span class="info-value">${customerName}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Email:</span>
+              <span class="info-value">${customerEmail}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Payment ID:</span>
+              <span class="info-value">${paymentId}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Order ID:</span>
+              <span class="info-value">${order.documentId || order.id}</span>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th style="text-align: center;">Quantity</th>
+                <th style="text-align: right;">Unit Price</th>
+                <th style="text-align: right;">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${cartItemsHtml}
+              <tr class="total-row">
+                <td colspan="3" style="text-align: right; padding: 15px 12px;">Total Amount Paid:</td>
+                <td style="text-align: right; color: #4CAF50;">₹${totalCost.toFixed(2)}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="actions no-print">
+            <button class="btn btn-primary" onclick="window.print()">🖨️ Print Receipt</button>
+            ${razorpayInvoiceUrl ? `<a href="${razorpayInvoiceUrl}" class="btn btn-secondary" target="_blank">📄 View Detailed Invoice</a>` : ''}
+          </div>
+
+          <div class="footer">
+            <p>Thank you for shopping with Kaalika Creations!</p>
+            <p>For any queries, please contact us at admin@kaalikacreations.com</p>
+            <p style="font-size: 12px; color: #999; margin-top: 15px;">
+              This is a computer-generated receipt and does not require a signature.
+            </p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    res.send(receiptHtml);
+  } catch (error) {
+    console.error("Receipt generation error:", error);
+    res.status(500).send("Error generating receipt");
+  }
+});
+
 // Start server only when run directly
 if (require.main === module) {
   app.listen(PORT, () => {
