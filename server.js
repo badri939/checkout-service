@@ -138,6 +138,7 @@ app.post("/api/create-order", strictLimiter, async (req, res) => {
       amount: amount * 100, // Razorpay expects amount in paise
       currency: currency,
       receipt: receipt || `receipt_${Date.now()}`,
+      payment_capture: 1  // Auto-capture payment (1 = auto, 0 = manual)
     };
 
     const order = await razorpay.orders.create(options);
