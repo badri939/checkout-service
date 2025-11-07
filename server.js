@@ -867,13 +867,9 @@ app.post("/api/razorpay/webhook", async (req, res) => {
               // Small delay to ensure order is fully saved in Strapi
               await new Promise(resolve => setTimeout(resolve, 1000));
               
-              // Generate receipt URL
-              const receiptUrl = `https://checkout-service-mdzx.onrender.com/receipt/${orderId}`;
-              
               const update = { 
                 razorpayInvoiceId: invoice.id, 
                 razorpayInvoiceUrl: invoice.short_url || null,
-                receiptUrl: receiptUrl,
                 invoiceSentAt: new Date().toISOString()
               };
               
