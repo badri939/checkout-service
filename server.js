@@ -951,21 +951,24 @@ app.post("/api/razorpay/webhook", async (req, res) => {
               await decrementProductStock(productId, quantity);
             }
           }
-          // Create and send Razorpay invoice (best-effort)
-          try {
-            console.log('📄 Attempting to create Razorpay invoice for order', orderId);
-            const invoice = await createAndSendRazorpayInvoice({ strapiOrder, paymentEntity });
-            if (invoice) {
-              console.log('✅ Invoice created successfully:', invoice.id, '- URL:', invoice.short_url);
-            } else {
-              console.warn('⚠️  Invoice creation returned null - check logs above for errors');
-            }
-          } catch (err) {
-            console.error('❌ Invoice creation failed (non-fatal):', err?.response?.data || err.message || err);
-          }
         }
       } catch (err) {
         console.error('Failed to update Strapi order:', err?.response?.data || err.message || err);
+      }
+      
+      // Create and send Razorpay invoice (best-effort) - outside try-catch so it runs even if update fails
+      if (status === 'captured') {
+        try {
+          console.log('📄 Attempting to create Razorpay invoice for order', orderId);
+          const invoice = await createAndSendRazorpayInvoice({ strapiOrder, paymentEntity });
+          if (invoice) {
+            console.log('✅ Invoice created successfully:', invoice.id, '- URL:', invoice.short_url);
+          } else {
+            console.warn('⚠️  Invoice creation returned null - check logs above for errors');
+          }
+        } catch (err) {
+          console.error('❌ Invoice creation failed (non-fatal):', err?.response?.data || err.message || err);
+        }
       }
     } else if (STRAPI_TOKEN) {
       // Create a minimal order record in Strapi with payment details
