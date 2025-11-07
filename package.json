@@ -4,7 +4,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "mocha --exit"
+    "test": "mocha --exit",
+    "diagnose": "node diagnose-invoice.js",
+    "check-production": "node check-production-config.js"
   },
   "keywords": [],
   "author": "",
