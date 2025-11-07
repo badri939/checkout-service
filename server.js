@@ -669,14 +669,11 @@ app.post("/api/razorpay/webhook", async (req, res) => {
     // Helper: Sanitize customer name for Razorpay (only letters, spaces, dots, hyphens)
     function sanitizeName(name) {
       if (!name) return null;
-      // Razorpay accepts: letters (any language), spaces, dots, hyphens, apostrophes
-      // Remove special characters, trim, and limit length
       const cleaned = name
-        .replace(/[^\p{L}\s\.\-']/gu, '') // Remove non-letter/space/dot/hyphen/apostrophe
+        .replace(/[^\p{L}\s\.\-']/gu, '')
         .trim()
-        .substring(0, 100); // Max 100 chars
+        .substring(0, 100);
       
-      // Must have at least 3 characters and not be all spaces
       if (cleaned.length < 3 || /^\s*$/.test(cleaned)) {
         return null;
       }
@@ -692,15 +689,14 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       contact: paymentEntity.contact || null
     };
     
-    // Only add name if valid (Razorpay rejects invalid names)
     if (sanitizedName) {
       customer.name = sanitizedName;
     } else if (rawName) {
       console.warn('⚠️  Customer name invalid for Razorpay:', rawName, '- proceeding without name');
     }
 
-    // Build line items from Strapi cart if available, else a single item representing total
-    let line_items = [];
+    // Build cart items
+    let cartItems = [];
     try {
       const cart = (strapiOrder && (strapiOrder.attributes && strapiOrder.attributes.cart)) || [];
       if (Array.isArray(cart) && cart.length > 0) {
@@ -708,58 +704,80 @@ app.post("/api/razorpay/webhook", async (req, res) => {
           const name = item.name || (item.product && item.product.attributes && item.product.attributes.title) || 'Item';
           const qty = item.quantity || item.qty || 1;
           const unit_cost = Math.round(((item.price || item.unitPrice || item.unit_cost || 0) * 100));
-          line_items.push({ name, quantity: qty, unit_cost });
+          cartItems.push({ name, quantity: qty, unit_cost });
         }
       }
     } catch (err) {
-      console.warn('Could not build detailed line items from Strapi order, falling back to total');
-      line_items = [];
+      console.warn('Could not build cart items from Strapi order, falling back to total');
+      cartItems = [];
     }
 
-    // Fallback to a single line item representing the total amount
-    if (line_items.length === 0) {
+    // Fallback
+    if (cartItems.length === 0) {
       const total = ((paymentEntity.amount || 0) / 100) || ((strapiOrder && strapiOrder.attributes && strapiOrder.attributes.totalCost) || 0);
-      line_items = [{ name: 'Order Total', quantity: 1, unit_cost: Math.round(total * 100) }];
+      cartItems = [{ name: 'Order Total', quantity: 1, unit_cost: Math.round(total * 100) }];
     }
 
-    // Calculate total amount in paise
-    const totalAmount = line_items.reduce((sum, item) => sum + (item.quantity * item.unit_cost), 0);
-
-    // For already-paid orders, use type 'invoice' WITHOUT amount field
-    // Razorpay will calculate from line_items
-    const invoicePayload = {
-      type: 'invoice',
-      customer: customer,
-      line_items,
-      currency: (paymentEntity.currency || 'INR'),
-      description: `Invoice for Payment ${paymentEntity.id}`,
-      // Don't auto-notify on creation - we'll issue it first
-      email_notify: 0,
-      sms_notify: 0
-    };
+    const auth = { username: process.env.RAZORPAY_KEY_ID, password: process.env.RAZORPAY_KEY_SECRET };
 
     try {
-      const auth = { username: process.env.RAZORPAY_KEY_ID, password: process.env.RAZORPAY_KEY_SECRET };
+      // Step 1: Create Razorpay Items (so we have item_id for the invoice)
+      console.log('📦 Creating Razorpay items for invoice...');
+      const createdItems = [];
       
-      // Step 1: Create invoice in draft state
+      for (const cartItem of cartItems) {
+        try {
+          const itemPayload = {
+            name: cartItem.name,
+            amount: cartItem.unit_cost,
+            currency: paymentEntity.currency || 'INR',
+            description: `Item for invoice`
+          };
+          
+          const itemResp = await axios.post(`${RAZORPAY_API_BASE}/v1/items`, itemPayload, { auth });
+          if (itemResp && itemResp.data && itemResp.data.id) {
+            createdItems.push({
+              item_id: itemResp.data.id,
+              quantity: cartItem.quantity
+            });
+            console.log('✅ Created Razorpay item:', itemResp.data.id, '-', cartItem.name);
+          }
+        } catch (itemErr) {
+          console.error('❌ Failed to create Razorpay item:', cartItem.name, itemErr?.response?.data || itemErr.message);
+          // Fallback: use inline item without item_id (may fail but worth trying)
+          createdItems.push({
+            name: cartItem.name,
+            amount: cartItem.unit_cost,
+            currency: paymentEntity.currency || 'INR',
+            quantity: cartItem.quantity
+          });
+        }
+      }
+
+      if (createdItems.length === 0) {
+        console.error('❌ No items created - cannot generate invoice');
+        return null;
+      }
+
+      // Step 2: Create invoice with item_id references
+      const invoicePayload = {
+        type: 'invoice',
+        customer: customer,
+        line_items: createdItems,
+        currency: paymentEntity.currency || 'INR',
+        description: `Invoice for Payment ${paymentEntity.id}`,
+        email_notify: 1,
+        sms_notify: 0
+      };
+
+      console.log('📄 Creating Razorpay invoice with', createdItems.length, 'items...');
       const resp = await axios.post(`${RAZORPAY_API_BASE}/v1/invoices`, invoicePayload, { auth });
+      
       if (resp && resp.data) {
         const invoice = resp.data;
-        console.log('✅ Razorpay invoice created (draft):', invoice && invoice.id);
-        
-        // Step 2: Issue the invoice (finalizes it and sends to customer)
-        try {
-          const issueResp = await axios.post(
-            `${RAZORPAY_API_BASE}/v1/invoices/${invoice.id}/issue`,
-            {},
-            { auth }
-          );
-          console.log('✅ Invoice issued successfully:', invoice.id);
-        } catch (issueErr) {
-          console.warn('⚠️  Could not issue invoice (might need manual issuing):', issueErr?.response?.data || issueErr.message);
-        }
+        console.log('✅ Razorpay invoice created:', invoice.id);
 
-        // If invoice has a short_url or id, attach to Strapi order (best-effort)
+        // Update Strapi order with invoice info
         try {
           if (strapiOrder && process.env.STRAPI_API_TOKEN) {
             const orderId = strapiOrder.id || (strapiOrder.data && strapiOrder.data.id);
@@ -770,14 +788,13 @@ app.post("/api/razorpay/webhook", async (req, res) => {
                 invoiceSentAt: new Date().toISOString()
               };
               await axios.put(`${STRAPI_BASE}/api/orders/${orderId}`, { data: update }, { headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } });
-              console.log('✅ Attached invoice info to Strapi order', orderId, '- Invoice ID:', invoice.id);
+              console.log('✅ Attached invoice info to Strapi order', orderId);
             }
           }
         } catch (err) {
           console.error('❌ Failed to attach invoice info to Strapi order:', err?.response?.data || err.message || err);
         }
 
-        // Razorpay will attempt to email if email_notify was set; return invoice info
         return invoice;
       }
     } catch (err) {
