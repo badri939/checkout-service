@@ -766,7 +766,7 @@ app.post("/api/razorpay/webhook", async (req, res) => {
         line_items: createdItems,
         currency: paymentEntity.currency || 'INR',
         description: `Invoice for Payment ${paymentEntity.id}`,
-        email_notify: 1,
+        email_notify: 0, // Don't auto-send - we'll send custom receipt email
         sms_notify: 0
       };
 
@@ -776,6 +776,80 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       if (resp && resp.data) {
         const invoice = resp.data;
         console.log('✅ Razorpay invoice created:', invoice.id);
+
+        // Send custom receipt email via SendGrid
+        if (customer.email && process.env.SENDGRID_API_KEY) {
+          try {
+            const totalAmount = createdItems.reduce((sum, item) => {
+              // Handle both item_id format and inline format
+              const qty = item.quantity || 1;
+              const amount = item.amount || 0;
+              return sum + (qty * amount);
+            }, 0);
+
+            const itemRows = createdItems.map(item => {
+              const qty = item.quantity || 1;
+              const amount = item.amount || 0;
+              const itemTotal = qty * amount;
+              return `<tr>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">${item.name || 'Item'}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd; text-align: center;">${qty}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd; text-align: right;">₹${(amount / 100).toFixed(2)}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd; text-align: right;">₹${(itemTotal / 100).toFixed(2)}</td>
+              </tr>`;
+            }).join('');
+
+            const emailHtml = `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #333;">Order Confirmation & Receipt</h2>
+                <p>Dear ${customer.name || 'Customer'},</p>
+                <p>Thank you for your order! Your payment has been successfully processed.</p>
+                
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                  <thead>
+                    <tr style="background-color: #f5f5f5;">
+                      <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: left;">Item</th>
+                      <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: center;">Qty</th>
+                      <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: right;">Unit Price</th>
+                      <th style="padding: 8px; border-bottom: 2px solid #ddd; text-align: right;">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${itemRows}
+                    <tr style="font-weight: bold; background-color: #f9f9f9;">
+                      <td colspan="3" style="padding: 12px; text-align: right;">Total Paid:</td>
+                      <td style="padding: 12px; text-align: right;">₹${(totalAmount / 100).toFixed(2)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                
+                <p><strong>Payment ID:</strong> ${paymentEntity.id}</p>
+                <p><strong>Invoice ID:</strong> ${invoice.id}</p>
+                <p><strong>Status:</strong> ✅ Paid</p>
+                
+                <p style="margin-top: 20px;">
+                  <a href="${invoice.short_url}" style="display: inline-block; padding: 12px 24px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px;">View Invoice</a>
+                </p>
+                
+                <p style="margin-top: 30px; color: #666; font-size: 12px; border-top: 1px solid #ddd; padding-top: 20px;">
+                  This is an automated receipt from Kaalika Creations. For any questions, please contact us.
+                </p>
+              </div>
+            `;
+
+            const emailMsg = {
+              to: customer.email,
+              from: process.env.SENDGRID_FROM_EMAIL || 'noreply@kaalikacreations.com',
+              subject: `Order Confirmation - Payment ${paymentEntity.id}`,
+              html: emailHtml
+            };
+
+            await sendgrid.send(emailMsg);
+            console.log('✅ Receipt email sent to', customer.email);
+          } catch (emailErr) {
+            console.error('❌ Failed to send receipt email:', emailErr?.response?.body || emailErr.message);
+          }
+        }
 
         // Update Strapi order with invoice info
         try {
