@@ -725,16 +725,19 @@ app.post("/api/razorpay/webhook", async (req, res) => {
     // Calculate total amount in paise
     const totalAmount = line_items.reduce((sum, item) => sum + (item.quantity * item.unit_cost), 0);
 
+    // For already-paid orders, use type 'invoice' WITHOUT amount field
+    // Razorpay will calculate from line_items
     const invoicePayload = {
-      type: 'link', // Use 'link' type which accepts amount field (creates payment link invoice)
-      amount: totalAmount, // Amount in paise
+      type: 'invoice',
       customer: customer,
       line_items,
       currency: (paymentEntity.currency || 'INR'),
-      description: `Invoice for Order`,
+      description: `Invoice for Payment ${paymentEntity.id}`,
       // Let Razorpay send the email if it recognizes the customer email
       email_notify: customer.email ? 1 : 0,
-      sms_notify: customer.contact ? 0 : 0
+      sms_notify: customer.contact ? 0 : 0,
+      // Mark as paid since payment already captured
+      paid: true
     };
 
     try {
