@@ -1078,6 +1078,7 @@ app.get("/receipt/:orderId", async (req, res) => {
     const { orderId } = req.params;
     
     if (!STRAPI_TOKEN) {
+      console.error('❌ STRAPI_API_TOKEN not configured');
       return res.status(500).send("Service configuration error");
     }
 
@@ -1085,9 +1086,12 @@ app.get("/receipt/:orderId", async (req, res) => {
     let order = null;
     try {
       const url = `${STRAPI_BASE}/api/orders/${orderId}`;
+      console.log('📄 Fetching receipt for order:', orderId);
       const response = await axios.get(url, { headers: { Authorization: `Bearer ${STRAPI_TOKEN}` } });
       order = response.data && response.data.data;
+      console.log('✅ Order fetched for receipt:', order ? 'found' : 'not found');
     } catch (err) {
+      console.error('❌ Error fetching order for receipt:', err.message);
       return res.status(404).send(`
         <html><body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
           <h2>Receipt Not Found</h2>
@@ -1320,8 +1324,15 @@ app.get("/receipt/:orderId", async (req, res) => {
 
     res.send(receiptHtml);
   } catch (error) {
-    console.error("Receipt generation error:", error);
-    res.status(500).send("Error generating receipt");
+    console.error("❌ Receipt generation error:", error.message);
+    console.error("Stack:", error.stack);
+    res.status(500).send(`
+      <html><body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
+        <h2>Error Generating Receipt</h2>
+        <p>There was an error creating your receipt. Please contact support.</p>
+        <p style="color: #666; font-size: 14px;">Error: ${error.message}</p>
+      </body></html>
+    `);
   }
 });
 
