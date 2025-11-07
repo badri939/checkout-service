@@ -722,21 +722,15 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       line_items = [{ name: 'Order Total', quantity: 1, unit_cost: Math.round(total * 100) }];
     }
 
-    // Calculate total amount from line items
-    const totalAmount = line_items.reduce((sum, item) => {
-      return sum + (item.unit_cost * item.quantity);
-    }, 0);
-
     const invoicePayload = {
       type: 'invoice',
-      amount: totalAmount, // Required: total invoice amount in paise
+      // Note: 'amount' field not needed for type 'invoice' - Razorpay calculates from line_items
       customer: customer,
       line_items,
       currency: (paymentEntity.currency || 'INR'),
       // Let Razorpay send the email if it recognizes the customer email
       email_notify: customer.email ? 1 : 0,
       sms_notify: customer.contact ? 0 : 0
-      // Note: expiry_date not needed for invoices created from captured payments
     };
 
     try {
