@@ -858,7 +858,7 @@ app.post("/api/razorpay/webhook", async (req, res) => {
         try {
           if (strapiOrder && process.env.STRAPI_API_TOKEN) {
             // Handle both existing order format and newly created order format
-            const orderId = strapiOrder.id || (strapiOrder.data && strapiOrder.data.id) || (strapiOrder.attributes && strapiOrder.attributes.id);
+            let orderId = strapiOrder.id || (strapiOrder.data && strapiOrder.data.id) || (strapiOrder.attributes && strapiOrder.attributes.id);
             
             if (!orderId) {
               console.warn('⚠️  Could not extract order ID from strapiOrder:', JSON.stringify(strapiOrder).substring(0, 200));
