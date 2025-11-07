@@ -703,9 +703,8 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       currency: (paymentEntity.currency || 'INR'),
       // Let Razorpay send the email if it recognizes the customer email
       email_notify: customer.email ? 1 : 0,
-      sms_notify: customer.contact ? 0 : 0,
-      // Set a short expiry (7 days) by default
-      expiry_date: Math.floor((Date.now() + 7 * 24 * 60 * 60 * 1000) / 1000)
+      sms_notify: customer.contact ? 0 : 0
+      // Note: expiry_date not needed for invoices created from captured payments
     };
 
     try {
