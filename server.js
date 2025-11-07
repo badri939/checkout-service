@@ -866,26 +866,6 @@ app.post("/api/razorpay/webhook", async (req, res) => {
               // Small delay to ensure order is fully saved in Strapi
               await new Promise(resolve => setTimeout(resolve, 1000));
               
-              // Verify order exists before updating
-              try {
-                const verifyUrl = `${STRAPI_BASE}/api/orders/${orderId}`;
-                const verifyResp = await axios.get(verifyUrl, { 
-                  headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
-                });
-                console.log('✅ Verified order exists:', orderId);
-              } catch (verifyErr) {
-                console.error('❌ Order does not exist at', orderId, '- trying to find by payment ID');
-                // Try to find order by payment ID instead
-                const foundOrder = await findStrapiOrderByPayment(paymentEntity.id, paymentEntity.order_id);
-                if (foundOrder && foundOrder.id) {
-                  console.log('✅ Found order by payment ID:', foundOrder.id);
-                  strapiOrder = foundOrder;
-                  orderId = foundOrder.id;
-                } else {
-                  throw new Error('Order not found in Strapi');
-                }
-              }
-              
               const update = { 
                 razorpayInvoiceId: invoice.id, 
                 razorpayInvoiceUrl: invoice.short_url || null,
@@ -895,10 +875,26 @@ app.post("/api/razorpay/webhook", async (req, res) => {
               const updateUrl = `${STRAPI_BASE}/api/orders/${orderId}`;
               console.log('🔄 Updating Strapi order at:', updateUrl);
               
-              await axios.put(updateUrl, { data: update }, { 
-                headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
-              });
-              console.log('✅ Attached invoice info to Strapi order', orderId);
+              try {
+                await axios.put(updateUrl, { data: update }, { 
+                  headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
+                });
+                console.log('✅ Attached invoice info to Strapi order', orderId);
+              } catch (updateErr) {
+                // If update fails, try to find order by payment ID
+                console.error('❌ Direct update failed, trying to find order by payment ID');
+                const foundOrder = await findStrapiOrderByPayment(paymentEntity.id, paymentEntity.order_id);
+                if (foundOrder && foundOrder.id) {
+                  console.log('✅ Found order by payment ID:', foundOrder.id);
+                  const retryUrl = `${STRAPI_BASE}/api/orders/${foundOrder.id}`;
+                  await axios.put(retryUrl, { data: update }, { 
+                    headers: { Authorization: `Bearer ${process.env.STRAPI_API_TOKEN}` } 
+                  });
+                  console.log('✅ Attached invoice info to Strapi order (retry)', foundOrder.id);
+                } else {
+                  throw updateErr;
+                }
+              }
             }
           }
         } catch (err) {
