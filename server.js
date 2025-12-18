@@ -11,6 +11,8 @@ const fs = require('fs');
 const path = require('path');
 const corsOptions = {
   origin: [
+    "http://localhost:3001", // Local development frontend
+    "http://localhost:3000", // Alternative local frontend port
     "https://kaalikacreations.com",
     "https://ecom-kaalika-crea-git-1a95c1-badriraminindia-gmailcoms-projects.vercel.app",
     "https://ecom-kaalika-creations-m9q3-8tu8asl7u.vercel.app"// add your actual frontend domain here if different
@@ -703,9 +705,10 @@ app.post("/api/razorpay/webhook", async (req, res) => {
       if (Array.isArray(cart) && cart.length > 0) {
         for (const item of cart) {
           const name = item.name || (item.product && item.product.attributes && item.product.attributes.title) || 'Item';
+          const size = item.size ? ` (Size: ${item.size})` : '';
           const qty = item.quantity || item.qty || 1;
           const unit_cost = Math.round(((item.price || item.unitPrice || item.unit_cost || 0) * 100));
-          cartItems.push({ name, quantity: qty, unit_cost });
+          cartItems.push({ name: name + size, quantity: qty, unit_cost });
         }
       }
     } catch (err) {
@@ -1117,12 +1120,13 @@ app.get("/receipt/:orderId", async (req, res) => {
     // Generate cart items HTML
     const cartItemsHtml = cart.map(item => {
       const itemName = item.name || 'Item';
+      const itemSize = item.size ? ` (Size: ${item.size})` : '';
       const itemPrice = item.price || 0;
       const itemQty = item.quantity || 1;
       const itemTotal = itemPrice * itemQty;
       return `
         <tr>
-          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: left;">${itemName}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: left;">${itemName}${itemSize}</td>
           <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: center;">${itemQty}</td>
           <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: right;">₹${itemPrice.toFixed(2)}</td>
           <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; text-align: right;">₹${itemTotal.toFixed(2)}</td>
