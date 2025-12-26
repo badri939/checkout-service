@@ -1117,10 +1117,11 @@ app.get("/receipt/:orderId", async (req, res) => {
     const createdAt = orderData.createdAt || new Date().toISOString();
     const razorpayInvoiceUrl = orderData.razorpayInvoiceUrl || null;
 
-    // Generate cart items HTML
+    // Generate cart items HTML (always show size column)
     const cartItemsHtml = cart.map(item => {
       const itemName = item.name || 'Item';
-      const itemSize = item.size ? ` (Size: ${item.size})` : '';
+      // Always show size, even if empty, for clarity
+      const itemSize = (typeof item.size !== 'undefined') ? ` (Size: ${item.size || 'N/A'})` : '';
       const itemPrice = item.price || 0;
       const itemQty = item.quantity || 1;
       const itemTotal = itemPrice * itemQty;
